@@ -1,14 +1,11 @@
 'use client';
 
-import { useActionState, useEffect, useState } from 'react';
-import { useFormStatus } from 'react-dom';
-import { useForm } from 'react-hook-form';
+import { useEffect, useState } from 'react';
+import { useForm, FormProvider } from 'react-hook-form';
 import { zodResolver } from '@hookform/resolvers/zod';
 import { z } from 'zod';
-import { submitAttendance } from '@/lib/actions';
 import { useToast } from '@/hooks/use-toast';
 import {
-  Form,
   FormControl,
   FormField,
   FormItem,
@@ -18,9 +15,14 @@ import {
 import { Input } from '@/components/ui/input';
 import { Button } from '@/components/ui/button';
 import { SignaturePad } from '@/components/attendance/signature-pad';
+import { useFirestore, addDocumentNonBlocking } from '@/firebase';
+import { collection, serverTimestamp } from 'firebase/firestore';
+import { useRouter } from 'next/navigation';
+import type { Session } from '@/lib/types';
+import { isPast } from 'date-fns';
 
 interface AttendanceFormProps {
-  sessionId: string;
+  session: Session;
 }
 
 const formSchema = z.object({
@@ -28,27 +30,14 @@ const formSchema = z.object({
   department: z.string().min(2, 'Jurusan/Jabatan minimal 2 karakter.'),
   studentId: z.string().min(3, 'NIM/NIP minimal 3 karakter.'),
   signature: z.string().nonempty('Tanda tangan tidak boleh kosong.'),
-  arrivalTime: z.string(),
 });
 
 type FormData = z.infer<typeof formSchema>;
 
-function SubmitButton() {
-  const { pending } = useFormStatus();
-  return (
-    <Button type="submit" disabled={pending} className="w-full">
-      {pending ? 'Mengirim...' : 'Kirim Kehadiran'}
-    </Button>
-  );
-}
-
-export default function AttendanceForm({ sessionId }: AttendanceFormProps) {
+export default function AttendanceForm({ session }: AttendanceFormProps) {
   const { toast } = useToast();
-  const [arrivalTime, setArrivalTime] = useState('');
-
-  useEffect(() => {
-    setArrivalTime(new Date().toISOString());
-  }, []);
+  const firestore = useFirestore();
+  const router = useRouter();
 
   const form = useForm<FormData>({
     resolver: zodResolver(formSchema),
@@ -57,31 +46,39 @@ export default function AttendanceForm({ sessionId }: AttendanceFormProps) {
       department: '',
       studentId: '',
       signature: '',
-      arrivalTime: '',
     },
   });
 
-  useEffect(() => {
-    if (arrivalTime) {
-      form.setValue('arrivalTime', arrivalTime);
-    }
-  }, [arrivalTime, form]);
-  
-  const submitAttendanceWithId = submitAttendance.bind(null, sessionId);
-  const [state, dispatch] = useActionState(submitAttendanceWithId, { message: null, errors: {} });
+  const { formState: { isSubmitting }, handleSubmit, register, control, setValue } = form;
 
-  useEffect(() => {
-    if (state.message && !state.errors) {
-        toast({ title: state.message, variant: 'destructive' });
+  const onSubmit = (data: FormData) => {
+    if (!firestore) {
+        toast({ title: "Database tidak terhubung.", variant: "destructive" });
+        return;
     }
-  }, [state, toast]);
-  
+
+    if (isPast(session.expiresAt)) {
+        toast({ title: "Sesi telah berakhir.", variant: "destructive" });
+        return;
+    }
+
+    const attendanceCollection = collection(firestore, 'sessions', session.id, 'attendance_records');
+    
+    addDocumentNonBlocking(attendanceCollection, {
+        ...data,
+        sessionId: session.id,
+        arrivalTime: serverTimestamp()
+    });
+
+    toast({ title: "Kehadiran berhasil direkam!" });
+    router.push(`/attend/${session.id}/success`);
+  };
 
   return (
-    <Form {...form}>
-      <form action={dispatch} className="space-y-6">
+    <FormProvider {...form}>
+      <form onSubmit={handleSubmit(onSubmit)} className="space-y-6">
         <FormField
-          control={form.control}
+          control={control}
           name="name"
           render={({ field }) => (
             <FormItem>
@@ -90,12 +87,11 @@ export default function AttendanceForm({ sessionId }: AttendanceFormProps) {
                 <Input placeholder="cth. John Doe" {...field} />
               </FormControl>
               <FormMessage />
-              {state.errors?.name && <p className="text-sm text-destructive">{state.errors.name[0]}</p>}
             </FormItem>
           )}
         />
         <FormField
-          control={form.control}
+          control={control}
           name="department"
           render={({ field }) => (
             <FormItem>
@@ -104,12 +100,11 @@ export default function AttendanceForm({ sessionId }: AttendanceFormProps) {
                 <Input placeholder="cth. Teknik Informatika / Staf" {...field} />
               </FormControl>
               <FormMessage />
-              {state.errors?.department && <p className="text-sm text-destructive">{state.errors.department[0]}</p>}
             </FormItem>
           )}
         />
         <FormField
-          control={form.control}
+          control={control}
           name="studentId"
           render={({ field }) => (
             <FormItem>
@@ -118,12 +113,11 @@ export default function AttendanceForm({ sessionId }: AttendanceFormProps) {
                 <Input placeholder="cth. 123456789" {...field} />
               </FormControl>
               <FormMessage />
-               {state.errors?.studentId && <p className="text-sm text-destructive">{state.errors.studentId[0]}</p>}
             </FormItem>
           )}
         />
         <FormField
-          control={form.control}
+          control={control}
           name="signature"
           render={() => (
             <FormItem>
@@ -131,18 +125,18 @@ export default function AttendanceForm({ sessionId }: AttendanceFormProps) {
               <FormControl>
                 <>
                   <SignaturePad name="signature" />
-                  <input type="hidden" {...form.register('signature')} />
+                  <input type="hidden" {...register('signature')} />
                 </>
               </FormControl>
               <FormMessage />
-               {state.errors?.signature && <p className="text-sm text-destructive">{state.errors.signature[0]}</p>}
             </FormItem>
           )}
         />
-        <input type="hidden" {...form.register('arrivalTime')} />
-
-        <SubmitButton />
+       
+        <Button type="submit" disabled={isSubmitting} className="w-full">
+            {isSubmitting ? 'Mengirim...' : 'Kirim Kehadiran'}
+        </Button>
       </form>
-    </Form>
+    </FormProvider>
   );
 }

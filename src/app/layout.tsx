@@ -3,6 +3,7 @@ import { Poppins, PT_Sans } from "next/font/google";
 import "./globals.css";
 import { Toaster } from "@/components/ui/toaster";
 import { cn } from "@/lib/utils";
+import { FirebaseClientProvider } from "@/firebase";
 
 const fontPoppins = Poppins({
   subsets: ["latin"],
@@ -37,8 +38,10 @@ export default function RootLayout({
           fontPTSans.variable
         )}
       >
-        {children}
-        <Toaster />
+        <FirebaseClientProvider>
+          {children}
+          <Toaster />
+        </FirebaseClientProvider>
       </body>
     </html>
   );

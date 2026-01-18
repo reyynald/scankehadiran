@@ -1,12 +1,13 @@
 'use client';
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useMemo } from 'react';
 import type { Session, Attendee } from '@/lib/types';
 import { exportToCsv, exportToPdf } from '@/lib/export';
 import { useToast } from '@/hooks/use-toast';
-import { removeSession } from '@/lib/actions';
 import { format, isPast } from 'date-fns';
 import { id } from 'date-fns/locale';
+import { useFirestore, useCollection, useMemoFirebase, deleteDocumentNonBlocking } from '@/firebase';
+import { collection, collectionGroup, query, orderBy, doc, Timestamp, getDocs } from 'firebase/firestore';
 
 import { Button } from '@/components/ui/button';
 import { Accordion, AccordionContent, AccordionItem, AccordionTrigger } from '@/components/ui/accordion';
@@ -17,26 +18,65 @@ import { PlusCircle, FileDown, FileText, Edit, QrCode as QrCodeIcon, Trash2, Use
 import { SessionDialog } from './session-dialog';
 import { AttendeesTable } from './attendees-table';
 import { QrCode as QrCodeComponent } from '@/components/common/qr-code';
+import { Skeleton } from '../ui/skeleton';
 
-
-interface DashboardClientProps {
-  initialSessions: Session[];
-  initialAttendees: Attendee[];
-  baseUrl: string;
+function DashboardLoadingSkeleton() {
+  return (
+    <>
+      <div className="flex justify-end mb-8">
+        <Skeleton className="h-10 w-40" />
+      </div>
+       <div className="w-full space-y-4">
+          {[...Array(2)].map((_, i) => (
+             <Skeleton key={i} className="h-24 w-full rounded-lg" />
+          ))}
+      </div>
+    </>
+  );
 }
 
-export default function DashboardClient({ initialSessions, initialAttendees, baseUrl }: DashboardClientProps) {
-  const [sessions] = useState<Session[]>(initialSessions);
-  const [attendees] = useState<Attendee[]>(initialAttendees);
+
+export default function DashboardClient() {
+  const firestore = useFirestore();
+  const { toast } = useToast();
+
+  const sessionsQuery = useMemoFirebase(() => {
+    if (!firestore) return null;
+    return query(collection(firestore, 'sessions'), orderBy('createdAt', 'desc'));
+  }, [firestore]);
+
+  const attendeesQuery = useMemoFirebase(() => {
+    if (!firestore) return null;
+    return collectionGroup(firestore, 'attendance_records');
+  }, [firestore]);
+
+  const { data: sessionsData, isLoading: sessionsLoading } = useCollection<Omit<Session, 'expiresAt' | 'createdAt'> & { expiresAt: Timestamp, createdAt: Timestamp }>(sessionsQuery);
+  const { data: attendeesData, isLoading: attendeesLoading } = useCollection<Omit<Attendee, 'arrivalTime'> & { arrivalTime: Timestamp }>(attendeesQuery);
+  
+  const sessions: Session[] = useMemo(() => {
+    return sessionsData?.map(s => ({
+      ...s,
+      createdAt: s.createdAt.toDate(),
+      expiresAt: s.expiresAt.toDate(),
+    })) ?? [];
+  }, [sessionsData]);
+
+  const attendees: Attendee[] = useMemo(() => {
+    return attendeesData?.map(a => ({
+      ...a,
+      arrivalTime: a.arrivalTime.toDate(),
+    })) ?? [];
+  }, [attendeesData]);
+
   const [isSessionDialogOpen, setSessionDialogOpen] = useState(false);
   const [editingSession, setEditingSession] = useState<Session | null>(null);
-  const [deletingSessionId, setDeletingSessionId] = useState<string | null>(null);
   const [attendUrl, setAttendUrl] = useState('');
+  const [baseUrl, setBaseUrl] = useState('');
   const [isClient, setIsClient] = useState(false);
-  const { toast } = useToast();
 
   useEffect(() => {
     setIsClient(true);
+    setBaseUrl(window.location.origin);
   }, []);
 
   const handleOpenCreateDialog = () => {
@@ -50,15 +90,32 @@ export default function DashboardClient({ initialSessions, initialAttendees, bas
   };
 
   const handleDeleteSession = async (sessionId: string) => {
-    setDeletingSessionId(sessionId);
-    const result = await removeSession(sessionId);
-    if (result.message) {
-      toast({
-        title: result.message,
-        variant: result.message.includes('Gagal') ? 'destructive' : 'default',
+    if (!firestore) return;
+    
+    try {
+      const attendeesRef = collection(firestore, 'sessions', sessionId, 'attendance_records');
+      const attendeesSnapshot = await getDocs(attendeesRef);
+
+      attendeesSnapshot.docs.forEach(docSnapshot => {
+          deleteDocumentNonBlocking(docSnapshot.ref);
       });
+      
+      const sessionRef = doc(firestore, 'sessions', sessionId);
+      deleteDocumentNonBlocking(sessionRef);
+      
+      toast({ title: 'Sesi dan semua data terkait akan dihapus.' });
+    } catch(e: any) {
+        toast({
+            title: "Gagal menghapus data sesi.",
+            description: e.message,
+            variant: "destructive",
+        });
     }
   };
+
+  if (sessionsLoading || attendeesLoading) {
+    return <DashboardLoadingSkeleton />;
+  }
 
   return (
     <>
@@ -70,11 +127,10 @@ export default function DashboardClient({ initialSessions, initialAttendees, bas
       </div>
       
       {sessions.length > 0 ? (
-        <Accordion type="single" collapsible className="w-full space-y-4" defaultValue={initialSessions[0]?.id}>
+        <Accordion type="single" collapsible className="w-full space-y-4" defaultValue={sessions[0]?.id}>
           {sessions.map((session) => {
             const sessionAttendees = attendees.filter(att => att.sessionId === session.id);
             const sessionExpired = isClient ? isPast(new Date(session.expiresAt)) : false;
-            const isDeleting = deletingSessionId === session.id;
 
             return (
               <AccordionItem value={session.id} key={session.id} className="border-b-0 rounded-lg border bg-card text-card-foreground shadow-sm data-[state=open]:ring-2 data-[state=open]:ring-primary">
@@ -108,8 +164,6 @@ export default function DashboardClient({ initialSessions, initialAttendees, bas
                                   <DialogTitle>Scan untuk Absen</DialogTitle>
                                   <DialogDescription>
                                       Pindai kode QR ini untuk mengisi formulir kehadiran atau unduh untuk dibagikan.
-                                      <br/>
-                                      <strong className="text-destructive">Catatan:</strong> Kode QR ini mungkin hanya berfungsi di jaringan lokal Anda selama pengembangan.
                                   </DialogDescription>
                                   </DialogHeader>
                                   <div className="flex flex-col items-center justify-center p-4 gap-4">
@@ -141,9 +195,9 @@ export default function DashboardClient({ initialSessions, initialAttendees, bas
                                       </AlertDialogDescription>
                                   </AlertDialogHeader>
                                   <AlertDialogFooter>
-                                      <AlertDialogCancel disabled={isDeleting}>Batal</AlertDialogCancel>
-                                      <AlertDialogAction onClick={() => handleDeleteSession(session.id)} disabled={isDeleting} className="bg-destructive hover:bg-destructive/90">
-                                          {isDeleting ? 'Menghapus...' : 'Hapus'}
+                                      <AlertDialogCancel>Batal</AlertDialogCancel>
+                                      <AlertDialogAction onClick={() => handleDeleteSession(session.id)} className="bg-destructive hover:bg-destructive/90">
+                                          Hapus
                                       </AlertDialogAction>
                                   </AlertDialogFooter>
                               </AlertDialogContent>

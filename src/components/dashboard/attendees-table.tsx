@@ -5,7 +5,6 @@ import type { Attendee } from '@/lib/types';
 import { format } from 'date-fns';
 import { id } from 'date-fns/locale';
 import { useToast } from '@/hooks/use-toast';
-import { removeAttendee } from '@/lib/actions';
 import {
   Table,
   TableBody,
@@ -28,6 +27,8 @@ import {
 import { Button } from '@/components/ui/button';
 import { Trash2 } from 'lucide-react';
 import Image from 'next/image';
+import { useFirestore, deleteDocumentNonBlocking } from '@/firebase';
+import { doc } from 'firebase/firestore';
 
 interface AttendeesTableProps {
   attendees: Attendee[];
@@ -35,25 +36,28 @@ interface AttendeesTableProps {
 
 export function AttendeesTable({ attendees }: AttendeesTableProps) {
   const { toast } = useToast();
-  const [isDeleting, setIsDeleting] = useState<string | null>(null);
+  const firestore = useFirestore();
   const [isClient, setIsClient] = useState(false);
 
   useEffect(() => {
     setIsClient(true);
   }, []);
 
-  const handleDelete = async (attendeeId: string) => {
-    setIsDeleting(attendeeId);
-    const result = await removeAttendee(attendeeId);
-    if (result.message) {
-      toast({
-        title: result.message,
-        variant: result.message.includes('Gagal') ? 'destructive' : 'default',
-      });
+  const handleDelete = (attendee: Attendee) => {
+    if (!firestore) {
+      toast({ title: 'Database tidak terhubung.', variant: 'destructive' });
+      return;
     }
-    setIsDeleting(null);
+
+    const attendeeRef = doc(firestore, 'sessions', attendee.sessionId, 'attendance_records', attendee.id);
+    deleteDocumentNonBlocking(attendeeRef);
+
+    toast({
+      title: 'Data peserta dihapus.',
+      description: 'Perubahan akan segera diterapkan.',
+    });
   };
-  
+
   if (attendees.length === 0) {
     return (
       <div className="text-center py-12 px-6 bg-card rounded-lg border border-dashed">
@@ -107,9 +111,9 @@ export function AttendeesTable({ attendees }: AttendeesTableProps) {
                       </AlertDialogDescription>
                     </AlertDialogHeader>
                     <AlertDialogFooter>
-                      <AlertDialogCancel disabled={isDeleting === attendee.id}>Batal</AlertDialogCancel>
-                      <AlertDialogAction onClick={() => handleDelete(attendee.id)} disabled={isDeleting === attendee.id} className="bg-destructive hover:bg-destructive/90">
-                        {isDeleting === attendee.id ? 'Menghapus...' : 'Hapus'}
+                      <AlertDialogCancel>Batal</AlertDialogCancel>
+                      <AlertDialogAction onClick={() => handleDelete(attendee)} className="bg-destructive hover:bg-destructive/90">
+                        Hapus
                       </AlertDialogAction>
                     </AlertDialogFooter>
                   </AlertDialogContent>
